@@ -1,0 +1,49 @@
+# requirements.txt
+# Federated Medical QA System Dependencies
+
+# Core ML Framework
+torch>=2.0.0
+transformers>=4.30.0
+
+# Web Framework (for server)
+flask>=2.3.0
+requests>=2.31.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Evaluation Metrics (optional but recommended)
+rouge-score>=0.1.2
+nltk>=3.8.1
+
+# System and Utilities
+pathlib2>=2.3.7; python_version < "3.4"
+typing-extensions>=4.0.0; python_version < "3.8"
+
+# Development and Testing (optional)
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=23.0.0
+flake8>=6.0.0
+
+# Logging and Monitoring
+tqdm>=4.65.0
+
+# Data Format Support
+jsonlines>=3.1.0
+
+# Optional: Enhanced tokenization (if available)
+# tokenizers>=0.13.0
+
+# Optional: GPU acceleration
+# nvidia-ml-py3>=7.352.0
+
+# Optional: Distributed training
+# torch-distributed>=0.3.0
+
+# Development Dependencies (install with: pip install -r requirements.txt -r requirements-dev.txt)
+# jupyter>=1.0.0
+# matplotlib>=3.7.0
+# seaborn>=0.12.0
+# plotly>=5.14.0
