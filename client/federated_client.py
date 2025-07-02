@@ -604,21 +604,39 @@ class FederatedMedicalClient(nn.Module):
     
     def compute_loss(self, logits, targets):
         """Compute loss with multiple components"""
+        # Validate tensor shapes
+        if logits.size(0) != targets.size(0):
+            raise ValueError(f"Batch size mismatch: logits {logits.shape}, targets {targets.shape}")
+        
+        if logits.size(1) != targets.size(1):
+            raise ValueError(f"Sequence length mismatch: logits {logits.shape}, targets {targets.shape}")
+        
+        # Ensure tensors are contiguous for proper reshaping
+        logits_flat = logits.contiguous().view(-1, logits.size(-1))
+        targets_flat = targets.contiguous().view(-1)
+        
+        # Additional validation
+        if logits_flat.size(0) != targets_flat.size(0):
+            raise ValueError(f"Flattened size mismatch: logits_flat {logits_flat.shape}, targets_flat {targets_flat.shape}")
+        
         # Language modeling loss
         lm_loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)),
-            targets.view(-1),
+            logits_flat,
+            targets_flat,
             ignore_index=self.config.data.pad_token_id
         )
         
         # Length penalty (optional)
         if self.config.training.length_penalty_weight > 0:
             seq_lengths = (targets != self.config.data.pad_token_id).sum(dim=1).float()
-            target_length = 20.0  # Target answer length
-            length_penalty = torch.mean(torch.abs(seq_lengths - target_length) / target_length)
-            
-            total_loss = (self.config.training.language_modeling_weight * lm_loss + 
-                         self.config.training.length_penalty_weight * length_penalty)
+            if seq_lengths.numel() > 0:  # Check if tensor is not empty
+                target_length = 20.0  # Target answer length
+                length_penalty = torch.mean(torch.abs(seq_lengths - target_length) / target_length)
+                
+                total_loss = (self.config.training.language_modeling_weight * lm_loss + 
+                             self.config.training.length_penalty_weight * length_penalty)
+            else:
+                total_loss = lm_loss
         else:
             total_loss = lm_loss
         
@@ -689,6 +707,15 @@ class FederatedMedicalClient(nn.Module):
         
         input_ids = tokenized['input_ids']
         
+        # Validate input
+        if input_ids.size(0) == 0:
+            self.logger.warning("Empty batch received, skipping training step")
+            return None, None
+        
+        if input_ids.size(1) < 2:
+            self.logger.warning("Sequence too short for next-token prediction, skipping")
+            return None, None
+        
         # Forward pass through initial layers
         hidden_states, attention_mask, position_ids = self.forward_initial_layers(input_ids)
         
@@ -705,11 +732,24 @@ class FederatedMedicalClient(nn.Module):
             server_response['position_ids']
         )
         
+        # Debug: Print tensor shapes
+        self.logger.debug(f"Logits shape: {logits.shape}")
+        self.logger.debug(f"Input IDs shape: {input_ids.shape}")
+        
         # Compute loss
-        targets = input_ids[:, 1:]  # Next token prediction
+        targets = input_ids[:, 1:].contiguous()  # Next token prediction
         logits_for_loss = logits[:, :-1, :].contiguous()
         
-        total_loss, lm_loss = self.compute_loss(logits_for_loss, targets)
+        # Additional debug info
+        self.logger.debug(f"Targets shape: {targets.shape}")
+        self.logger.debug(f"Logits for loss shape: {logits_for_loss.shape}")
+        
+        try:
+            total_loss, lm_loss = self.compute_loss(logits_for_loss, targets)
+        except Exception as e:
+            self.logger.error(f"Loss computation failed: {e}")
+            self.logger.error(f"Logits shape: {logits_for_loss.shape}, Targets shape: {targets.shape}")
+            return None, None
         
         # Backward pass
         total_loss.backward()
@@ -798,7 +838,7 @@ class FederatedMedicalClient(nn.Module):
                     )
                     
                     # Compute loss
-                    targets = input_ids[:, 1:]
+                    targets = input_ids[:, 1:].contiguous()
                     logits_for_loss = logits[:, :-1, :].contiguous()
                     total_loss, _ = self.compute_loss(logits_for_loss, targets)
                     
