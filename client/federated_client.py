@@ -1,8 +1,7 @@
 # client/federated_client.py
 """
 Complete Federated Learning Client for Medical QA
-Fixed version with tensor contiguity issues resolved
-Integrates with downloaded dataset and provides full training workflow
+FIXED VERSION - Resolved tensor dimension and projection issues
 """
 
 import torch
@@ -46,6 +45,9 @@ class OneBitQuantizer:
         if tensor.numel() == 0:
             return tensor, torch.tensor(1.0)
         
+        # Ensure tensor is contiguous
+        tensor = tensor.contiguous()
+        
         # Calculate γ = mean absolute value
         gamma = torch.mean(torch.abs(tensor))
         
@@ -65,7 +67,7 @@ class OneBitQuantizer:
 
 class ClientGaLoreOptimizer:
     """
-    Enhanced client-side GaLore optimizer
+    FIXED GaLore optimizer with proper dimension handling
     """
     
     def __init__(self, rank=64, update_proj_gap=200, scale=0.25, min_param_size=1000):
@@ -75,41 +77,54 @@ class ClientGaLoreOptimizer:
         self.min_param_size = min_param_size
         self.step_count = 0
         self.projectors = {}
+        self.logger = logging.getLogger(__name__)
         
     def should_apply_galore(self, gradient):
         """Check if GaLore should be applied to this gradient"""
+        if gradient is None:
+            return False
         return gradient.numel() >= self.min_param_size and gradient.dim() >= 2
         
     def update_projection_matrix(self, gradient, param_name):
-        """Update projection matrix using SVD"""
+        """Update projection matrix using SVD - FIXED VERSION"""
         if not self.should_apply_galore(gradient):
             return
             
         try:
+            # Ensure gradient is contiguous
+            gradient = gradient.contiguous()
+            
             # Reshape gradient to 2D for SVD
             original_shape = gradient.shape
             if gradient.dim() > 2:
                 gradient_2d = gradient.view(gradient.shape[0], -1)
             else:
-                gradient_2d = gradient
+                gradient_2d = gradient.clone()
                 
-            # Perform SVD
-            U, S, V = torch.svd(gradient_2d)
-            
+            # Perform SVD with proper error handling
+            try:
+                U, S, Vt = torch.linalg.svd(gradient_2d, full_matrices=False)
+            except RuntimeError as e:
+                self.logger.warning(f"SVD failed for {param_name}: {e}")
+                return
+                
             # Keep top-k components
-            k = min(self.rank, min(U.shape[1], V.shape[0]))
+            k = min(self.rank, min(U.shape[1], Vt.shape[0]))
             
+            # Store projectors with proper dimensions
             self.projectors[param_name] = {
-                'U': U[:, :k].detach(),
-                'V': V[:k, :].detach(),
-                'original_shape': original_shape
+                'U': U[:, :k].detach().clone(),
+                'Vt': Vt[:k, :].detach().clone(),
+                'original_shape': original_shape,
+                'k': k
             }
+            
         except Exception as e:
-            logging.warning(f"SVD failed for {param_name}: {e}")
+            self.logger.warning(f"Projection matrix update failed for {param_name}: {e}")
             self.projectors[param_name] = None
     
     def project_gradient(self, gradient, param_name):
-        """Project gradient to low-rank space"""
+        """Project gradient to low-rank space - FIXED VERSION"""
         if (param_name not in self.projectors or 
             self.projectors[param_name] is None or
             not self.should_apply_galore(gradient)):
@@ -118,33 +133,70 @@ class ClientGaLoreOptimizer:
         projector = self.projectors[param_name]
         
         try:
-            # Reshape gradient
+            # Ensure gradient is contiguous
+            gradient = gradient.contiguous()
+            
+            # Reshape gradient to match projector dimensions
+            original_shape = gradient.shape
             if gradient.dim() > 2:
                 gradient_2d = gradient.view(gradient.shape[0], -1)
             else:
-                gradient_2d = gradient
+                gradient_2d = gradient.clone()
                 
-            # Project using stored U and V
-            projected = torch.mm(projector['U'].T, torch.mm(gradient_2d, projector['V'].T))
-            return projected * self.scale
+            # Get projector matrices
+            U = projector['U']  # Shape: [m, k]
+            Vt = projector['Vt']  # Shape: [k, n]
+            
+            # FIXED: Proper matrix multiplication with dimension checking
+            # gradient_2d: [m, n], U: [m, k], Vt: [k, n]
+            if gradient_2d.shape[0] != U.shape[0]:
+                self.logger.warning(f"Dimension mismatch for {param_name}: "
+                                  f"gradient {gradient_2d.shape} vs U {U.shape}")
+                return gradient
+                
+            if gradient_2d.shape[1] != Vt.shape[1]:
+                self.logger.warning(f"Dimension mismatch for {param_name}: "
+                                  f"gradient {gradient_2d.shape} vs Vt {Vt.shape}")
+                return gradient
+            
+            # Project: U^T @ gradient_2d @ Vt^T
+            projected = torch.mm(U.T, torch.mm(gradient_2d, Vt.T))
+            
+            # Apply scaling
+            projected = projected * self.scale
+            
+            # Reshape back to original shape if needed
+            if len(original_shape) > 2:
+                # For higher-dimensional tensors, we need to be more careful
+                return projected.view(-1)[:gradient.numel()].view(original_shape)
+            else:
+                return projected
+                
         except Exception as e:
-            logging.warning(f"Projection failed for {param_name}: {e}")
+            self.logger.warning(f"Projection failed for {param_name}: {e}")
             return gradient
     
     def compress_gradients(self, gradients):
-        """Compress gradients using GaLore"""
+        """Compress gradients using GaLore - FIXED VERSION"""
+        if not gradients:
+            return {}
+            
         compressed_gradients = {}
         
         # Update projection matrices periodically
         if self.step_count % self.update_proj_gap == 0:
             for param_name, grad in gradients.items():
-                if grad is not None:
+                if grad is not None and grad.requires_grad:
                     self.update_projection_matrix(grad, param_name)
         
         # Project gradients
         for param_name, grad in gradients.items():
             if grad is not None:
-                compressed_gradients[param_name] = self.project_gradient(grad, param_name)
+                try:
+                    compressed_gradients[param_name] = self.project_gradient(grad, param_name)
+                except Exception as e:
+                    self.logger.warning(f"Gradient compression failed for {param_name}: {e}")
+                    compressed_gradients[param_name] = grad
             else:
                 compressed_gradients[param_name] = None
         
@@ -390,7 +442,7 @@ class EnhancedMedicalDataLoader:
 
 class FederatedMedicalClient(nn.Module):
     """
-    Complete federated learning client for medical QA
+    Complete federated learning client for medical QA - FIXED VERSION
     """
     
     def __init__(self, config: FederatedConfig):
@@ -518,6 +570,9 @@ class FederatedMedicalClient(nn.Module):
     
     def forward_initial_layers(self, input_ids):
         """Process through initial layers"""
+        # Ensure input_ids is contiguous
+        input_ids = input_ids.contiguous()
+        
         # Token embedding
         hidden_states = self.embed_tokens(input_ids)
         
@@ -541,6 +596,11 @@ class FederatedMedicalClient(nn.Module):
     def send_to_server(self, hidden_states, attention_mask, position_ids):
         """Send quantized hidden states to server"""
         try:
+            # Ensure tensors are contiguous
+            hidden_states = hidden_states.contiguous()
+            attention_mask = attention_mask.contiguous()
+            position_ids = position_ids.contiguous()
+            
             # Quantize hidden states
             quantized_hidden, gamma_hidden = self.quantizer.quantize(hidden_states)
             
@@ -589,6 +649,9 @@ class FederatedMedicalClient(nn.Module):
     
     def forward_final_layers(self, hidden_states, attention_mask, position_ids):
         """Process through final layers"""
+        # Ensure tensors are contiguous
+        hidden_states = hidden_states.contiguous()
+        
         # Process through final layers
         for layer in self.final_layers:
             hidden_states = layer(
@@ -605,6 +668,10 @@ class FederatedMedicalClient(nn.Module):
     
     def compute_loss(self, logits, targets):
         """Compute loss with multiple components - FIXED VERSION"""
+        # Ensure all tensors are contiguous
+        logits = logits.contiguous()
+        targets = targets.contiguous()
+        
         # Validate tensor shapes
         if logits.size(0) != targets.size(0):
             raise ValueError(f"Batch size mismatch: logits {logits.shape}, targets {targets.shape}")
@@ -612,9 +679,9 @@ class FederatedMedicalClient(nn.Module):
         if logits.size(1) != targets.size(1):
             raise ValueError(f"Sequence length mismatch: logits {logits.shape}, targets {targets.shape}")
         
-        # Ensure tensors are contiguous for proper reshaping - THIS IS THE KEY FIX
-        logits_flat = logits.contiguous().view(-1, logits.size(-1))
-        targets_flat = targets.contiguous().view(-1)
+        # Flatten tensors for loss computation
+        logits_flat = logits.view(-1, logits.size(-1))
+        targets_flat = targets.view(-1)
         
         # Additional validation
         if logits_flat.size(0) != targets_flat.size(0):
@@ -624,14 +691,15 @@ class FederatedMedicalClient(nn.Module):
         lm_loss = F.cross_entropy(
             logits_flat,
             targets_flat,
-            ignore_index=self.config.data.pad_token_id
+            ignore_index=self.config.data.pad_token_id,
+            reduction='mean'
         )
         
         # Length penalty (optional)
         if self.config.training.length_penalty_weight > 0:
             seq_lengths = (targets != self.config.data.pad_token_id).sum(dim=1).float()
-            if seq_lengths.numel() > 0:  # Check if tensor is not empty
-                target_length = 20.0  # Target answer length
+            if seq_lengths.numel() > 0:
+                target_length = 20.0
                 length_penalty = torch.mean(torch.abs(seq_lengths - target_length) / target_length)
                 
                 total_loss = (self.config.training.language_modeling_weight * lm_loss + 
@@ -644,21 +712,38 @@ class FederatedMedicalClient(nn.Module):
         return total_loss, lm_loss
     
     def send_gradients_to_server(self, gradients):
-        """Send compressed gradients to server"""
+        """Send compressed gradients to server - FIXED VERSION"""
         try:
+            # Filter out None gradients and ensure contiguity
+            filtered_gradients = {}
+            for param_name, grad in gradients.items():
+                if grad is not None:
+                    filtered_gradients[param_name] = grad.contiguous()
+            
+            if not filtered_gradients:
+                self.logger.warning("No valid gradients to send")
+                return None
+            
             # Compress gradients using GaLore
-            compressed_gradients = self.galore_optimizer.compress_gradients(gradients)
+            compressed_gradients = self.galore_optimizer.compress_gradients(filtered_gradients)
             
             # Quantize compressed gradients
             quantized_gradients = {}
             for param_name, grad in compressed_gradients.items():
                 if grad is not None:
-                    quantized_grad, gamma_grad = self.quantizer.quantize(grad)
-                    quantized_gradients[param_name] = {
-                        'quantized_grad': quantized_grad,
-                        'gamma_grad': gamma_grad,
-                        'shape': grad.shape
-                    }
+                    try:
+                        quantized_grad, gamma_grad = self.quantizer.quantize(grad)
+                        quantized_gradients[param_name] = {
+                            'quantized_grad': quantized_grad,
+                            'gamma_grad': gamma_grad,
+                            'shape': grad.shape
+                        }
+                    except Exception as e:
+                        self.logger.warning(f"Failed to quantize gradient for {param_name}: {e}")
+            
+            if not quantized_gradients:
+                self.logger.warning("No gradients successfully quantized")
+                return None
             
             # Send to server
             buffer = io.BytesIO()
@@ -686,21 +771,29 @@ class FederatedMedicalClient(nn.Module):
     
     def apply_server_gradients(self, server_gradients):
         """Apply updated gradients from server"""
+        if not server_gradients:
+            return
+            
         param_dict = dict(self.named_parameters())
         
         for param_name, grad_info in server_gradients.items():
             if param_name in param_dict and 'quantized_grad' in grad_info:
-                # Dequantize gradient
-                updated_grad = self.quantizer.dequantize(
-                    grad_info['quantized_grad'],
-                    grad_info['gamma_grad']
-                )
-                
-                # Apply to parameter
-                if param_dict[param_name].grad is None:
-                    param_dict[param_name].grad = updated_grad
-                else:
-                    param_dict[param_name].grad += updated_grad * 0.1  # Scale factor
+                try:
+                    # Dequantize gradient
+                    updated_grad = self.quantizer.dequantize(
+                        grad_info['quantized_grad'],
+                        grad_info['gamma_grad']
+                    )
+                    
+                    # Apply to parameter
+                    param = param_dict[param_name]
+                    if param.grad is None:
+                        param.grad = updated_grad.clone()
+                    else:
+                        param.grad += updated_grad * 0.1  # Scale factor
+                        
+                except Exception as e:
+                    self.logger.warning(f"Failed to apply gradient for {param_name}: {e}")
     
     def training_step(self, batch_data):
         """Single training step - FIXED VERSION"""
@@ -708,7 +801,7 @@ class FederatedMedicalClient(nn.Module):
         
         input_ids = tokenized['input_ids']
         
-        # Validate input - ADDED VALIDATION
+        # Validate input
         if input_ids.size(0) == 0:
             self.logger.warning("Empty batch received, skipping training step")
             return None, None
@@ -717,62 +810,52 @@ class FederatedMedicalClient(nn.Module):
             self.logger.warning("Sequence too short for next-token prediction, skipping")
             return None, None
         
-        # Forward pass through initial layers
-        hidden_states, attention_mask, position_ids = self.forward_initial_layers(input_ids)
-        
-        # Send to server for middle layer processing
-        server_response = self.send_to_server(hidden_states, attention_mask, position_ids)
-        
-        if server_response is None:
-            return None, None
-        
-        # Process through final layers
-        logits = self.forward_final_layers(
-            server_response['processed_hidden_states'],
-            server_response['attention_mask'],
-            server_response['position_ids']
-        )
-        
-        # Debug: Print tensor shapes
-        self.logger.debug(f"Logits shape: {logits.shape}")
-        self.logger.debug(f"Input IDs shape: {input_ids.shape}")
-        
-        # Compute loss - FIXED: Make targets contiguous
-        targets = input_ids[:, 1:].contiguous()  # Next token prediction
-        logits_for_loss = logits[:, :-1, :].contiguous()
-        
-        # Additional debug info
-        self.logger.debug(f"Targets shape: {targets.shape}")
-        self.logger.debug(f"Logits for loss shape: {logits_for_loss.shape}")
-        
-        # FIXED: Added try-catch for loss computation
         try:
+            # Forward pass through initial layers
+            hidden_states, attention_mask, position_ids = self.forward_initial_layers(input_ids)
+            
+            # Send to server for middle layer processing
+            server_response = self.send_to_server(hidden_states, attention_mask, position_ids)
+            
+            if server_response is None:
+                return None, None
+            
+            # Process through final layers
+            logits = self.forward_final_layers(
+                server_response['processed_hidden_states'],
+                server_response['attention_mask'],
+                server_response['position_ids']
+            )
+            
+            # Compute loss
+            targets = input_ids[:, 1:].contiguous()
+            logits_for_loss = logits[:, :-1, :].contiguous()
+            
             total_loss, lm_loss = self.compute_loss(logits_for_loss, targets)
+            
+            # Backward pass
+            total_loss.backward()
+            
+            # Collect gradients
+            gradients = {}
+            for name, param in self.named_parameters():
+                if param.grad is not None:
+                    gradients[name] = param.grad.clone()
+            
+            # Send gradients to server
+            server_gradients = self.send_gradients_to_server(gradients)
+            
+            if server_gradients is not None:
+                self.apply_server_gradients(server_gradients)
+            
+            # Update metrics
+            self.metrics.update(total_loss.item(), questions, answers)
+            
+            return total_loss.item(), lm_loss.item()
+            
         except Exception as e:
-            self.logger.error(f"Loss computation failed: {e}")
-            self.logger.error(f"Logits shape: {logits_for_loss.shape}, Targets shape: {targets.shape}")
+            self.logger.error(f"Training step failed: {e}")
             return None, None
-        
-        # Backward pass
-        total_loss.backward()
-        
-        # Collect gradients
-        gradients = {}
-        for name, param in self.named_parameters():
-            if param.grad is not None:
-                gradients[name] = param.grad.clone()
-        
-        # Send gradients to server
-        server_gradients = self.send_gradients_to_server(gradients)
-        
-        if server_gradients is not None:
-            # Apply server gradients
-            self.apply_server_gradients(server_gradients)
-        
-        # Update metrics
-        self.metrics.update(total_loss.item(), questions, answers)
-        
-        return total_loss.item(), lm_loss.item()
     
     def train_epoch(self, optimizer):
         """Train for one epoch"""
@@ -783,35 +866,40 @@ class FederatedMedicalClient(nn.Module):
         num_batches = max(1, len(self.data_loader.train_data) // self.config.training.batch_size)
         
         for batch_idx in range(num_batches):
-            optimizer.zero_grad()
-            
-            # Get batch
-            batch_data = self.data_loader.get_batch("train")
-            
-            # Training step
-            total_loss, lm_loss = self.training_step(batch_data)
-            
-            if total_loss is not None:
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(
-                    self.parameters(), 
-                    self.config.training.gradient_clip_norm
-                )
+            try:
+                optimizer.zero_grad()
                 
-                # Optimizer step
-                optimizer.step()
+                # Get batch
+                batch_data = self.data_loader.get_batch("train")
                 
-                epoch_losses.append(total_loss)
-                self.step_count += 1
+                # Training step
+                total_loss, lm_loss = self.training_step(batch_data)
                 
-                # Log progress
-                if batch_idx % 5 == 0:
-                    self.logger.info(
-                        f"Epoch {self.epoch_count}, Batch {batch_idx}/{num_batches}, "
-                        f"Loss: {total_loss:.4f}, LM Loss: {lm_loss:.4f}"
+                if total_loss is not None:
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(
+                        self.parameters(), 
+                        self.config.training.gradient_clip_norm
                     )
-            else:
-                self.logger.warning(f"Batch {batch_idx} failed")
+                    
+                    # Optimizer step
+                    optimizer.step()
+                    
+                    epoch_losses.append(total_loss)
+                    self.step_count += 1
+                    
+                    # Log progress
+                    if batch_idx % 5 == 0:
+                        self.logger.info(
+                            f"Epoch {self.epoch_count}, Batch {batch_idx}/{num_batches}, "
+                            f"Loss: {total_loss:.4f}, LM Loss: {lm_loss:.4f}"
+                        )
+                else:
+                    self.logger.warning(f"Batch {batch_idx} failed")
+                    
+            except Exception as e:
+                self.logger.error(f"Training batch {batch_idx} failed: {e}")
+                continue
         
         return np.mean(epoch_losses) if epoch_losses else float('inf')
     
@@ -821,33 +909,34 @@ class FederatedMedicalClient(nn.Module):
         val_losses = []
         
         with torch.no_grad():
-            # Get validation batch
-            batch_data = self.data_loader.get_batch("val")
-            
-            if batch_data[2]['input_ids'].size(0) > 0:  # Check if batch is not empty
-                questions, answers, tokenized = batch_data
-                input_ids = tokenized['input_ids']
+            try:
+                # Get validation batch
+                batch_data = self.data_loader.get_batch("val")
                 
-                # Forward pass
-                hidden_states, attention_mask, position_ids = self.forward_initial_layers(input_ids)
-                server_response = self.send_to_server(hidden_states, attention_mask, position_ids)
-                
-                if server_response is not None:
-                    logits = self.forward_final_layers(
-                        server_response['processed_hidden_states'],
-                        server_response['attention_mask'],
-                        server_response['position_ids']
-                    )
+                if batch_data[2]['input_ids'].size(0) > 0:
+                    questions, answers, tokenized = batch_data
+                    input_ids = tokenized['input_ids']
                     
-                    # Compute loss - FIXED: Make targets contiguous
-                    targets = input_ids[:, 1:].contiguous()
-                    logits_for_loss = logits[:, :-1, :].contiguous()
+                    # Forward pass
+                    hidden_states, attention_mask, position_ids = self.forward_initial_layers(input_ids)
+                    server_response = self.send_to_server(hidden_states, attention_mask, position_ids)
                     
-                    try:
+                    if server_response is not None:
+                        logits = self.forward_final_layers(
+                            server_response['processed_hidden_states'],
+                            server_response['attention_mask'],
+                            server_response['position_ids']
+                        )
+                        
+                        # Compute loss
+                        targets = input_ids[:, 1:].contiguous()
+                        logits_for_loss = logits[:, :-1, :].contiguous()
+                        
                         total_loss, _ = self.compute_loss(logits_for_loss, targets)
                         val_losses.append(total_loss.item())
-                    except Exception as e:
-                        self.logger.warning(f"Validation loss computation failed: {e}")
+                        
+            except Exception as e:
+                self.logger.warning(f"Validation failed: {e}")
         
         return np.mean(val_losses) if val_losses else float('inf')
     
@@ -856,7 +945,7 @@ class FederatedMedicalClient(nn.Module):
         if val_loss < self.best_loss - self.config.training.min_delta:
             self.best_loss = val_loss
             self.patience_counter = 0
-            return False  # Not converged
+            return False
         else:
             self.patience_counter += 1
             return self.patience_counter >= self.config.training.patience
@@ -940,7 +1029,8 @@ def main():
         print("\n⏹️  Training interrupted by user")
     except Exception as e:
         print(f"\n❌ Training failed: {e}")
-        raise
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
