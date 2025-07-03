@@ -373,7 +373,7 @@ class CSVMedicalDataLoader:
         self.load_csv_dataset()
     
     def load_csv_dataset(self):
-        """Load the CSV dataset"""
+        """Load the CSV dataset - optimized for your specific CSV structure"""
         dataset_path = self.data_dir / self.config.data.dataset_file
         
         if not dataset_path.exists():
@@ -382,7 +382,7 @@ class CSVMedicalDataLoader:
             dataset_path, stats = downloader.download_and_process()
             
             if not dataset_path or stats['total_questions'] == 0:
-                raise ValueError("No valid data found in CSV files. Please check your CSV dataset.")
+                raise ValueError("No valid data found in CSV files. Please check that 'dataset.csv' exists in your data directory.")
             
             self.logger.info(f"Processed CSV dataset with {stats['total_questions']} questions")
         
@@ -395,9 +395,24 @@ class CSVMedicalDataLoader:
             raise
         
         if not self.dataset:
-            raise ValueError("Dataset is empty. Please check your CSV files.")
+            raise ValueError("Dataset is empty. Please check that your CSV file 'dataset.csv' contains valid data.")
         
         self.logger.info(f"Loaded {len(self.dataset)} medical QA pairs from CSV")
+        
+        # Show dataset statistics
+        categories = {}
+        for item in self.dataset:
+            category = item.get('category', 'unknown')
+            categories[category] = categories.get(category, 0) + 1
+        
+        self.logger.info(f"Dataset categories: {dict(list(categories.items())[:10])}")  # Show first 10
+        
+        # Show sample data for verification
+        if self.dataset:
+            sample = self.dataset[0]
+            self.logger.info(f"Sample data - Question: {sample['question'][:100]}...")
+            self.logger.info(f"Sample data - Answer: {sample['answer'][:100]}...")
+            self.logger.info(f"Sample data - Category: {sample['category']}")
         
         # Split dataset
         self.split_dataset()
@@ -1098,7 +1113,7 @@ def main():
     print("Configuration:")
     print(f"  Model: {config.model.hidden_size}d, {config.model.num_hidden_layers} layers")
     print(f"  Training: {config.training.max_epochs} epochs, lr={config.training.learning_rate}")
-    print(f"  Data: CSV files in {config.data.data_dir}/")
+    print(f"  Data: CSV files in {config.data.data_dir}/ (expecting dataset.csv)")
     print(f"  Server: {config.client.server_url}")
     print("=" * 60)
     
