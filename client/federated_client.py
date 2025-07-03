@@ -1,7 +1,7 @@
 # client/federated_client.py
 """
 Complete Federated Learning Client for Medical QA
-IMPROVED VERSION - Better error handling and fallback mechanisms
+CSV-ONLY VERSION - Uses only the provided CSV dataset
 """
 
 import torch
@@ -352,8 +352,10 @@ class LlamaDecoderLayer(nn.Module):
 
         return hidden_states
 
-class EnhancedMedicalDataLoader:
-    """Enhanced data loader that integrates with downloaded dataset"""
+class CSVMedicalDataLoader:
+    """
+    CSV-only data loader for medical QA datasets
+    """
     
     def __init__(self, config: FederatedConfig):
         self.config = config
@@ -367,24 +369,35 @@ class EnhancedMedicalDataLoader:
         # Setup logging
         self.logger = logging.getLogger(__name__)
         
-        # Load or download dataset
-        self.load_dataset()
+        # Load CSV dataset
+        self.load_csv_dataset()
     
-    def load_dataset(self):
-        """Load the medical QA dataset"""
+    def load_csv_dataset(self):
+        """Load the CSV dataset"""
         dataset_path = self.data_dir / self.config.data.dataset_file
         
         if not dataset_path.exists():
-            self.logger.info("Dataset not found. Downloading...")
+            self.logger.info("JSON dataset not found. Processing CSV files...")
             downloader = MedicalQADownloader(str(self.data_dir))
             dataset_path, stats = downloader.download_and_process()
-            self.logger.info(f"Downloaded dataset with {stats['total_questions']} questions")
+            
+            if not dataset_path or stats['total_questions'] == 0:
+                raise ValueError("No valid data found in CSV files. Please check your CSV dataset.")
+            
+            self.logger.info(f"Processed CSV dataset with {stats['total_questions']} questions")
         
-        # Load dataset
-        with open(dataset_path, 'r', encoding='utf-8') as f:
-            self.dataset = json.load(f)
+        # Load processed dataset
+        try:
+            with open(dataset_path, 'r', encoding='utf-8') as f:
+                self.dataset = json.load(f)
+        except Exception as e:
+            self.logger.error(f"Error loading dataset: {e}")
+            raise
         
-        self.logger.info(f"Loaded {len(self.dataset)} medical QA pairs")
+        if not self.dataset:
+            raise ValueError("Dataset is empty. Please check your CSV files.")
+        
+        self.logger.info(f"Loaded {len(self.dataset)} medical QA pairs from CSV")
         
         # Split dataset
         self.split_dataset()
@@ -400,6 +413,14 @@ class EnhancedMedicalDataLoader:
         self.train_data = self.dataset[:train_size]
         self.val_data = self.dataset[train_size:train_size + val_size]
         self.test_data = self.dataset[train_size + val_size:]
+        
+        # Ensure we have at least some data in each split
+        if len(self.train_data) == 0:
+            self.train_data = self.dataset[:max(1, total_size // 2)]
+        if len(self.val_data) == 0:
+            self.val_data = self.dataset[:max(1, total_size // 4)]
+        if len(self.test_data) == 0:
+            self.test_data = self.dataset[:max(1, total_size // 4)]
         
         self.logger.info(f"Dataset split - Train: {len(self.train_data)}, "
                         f"Val: {len(self.val_data)}, Test: {len(self.test_data)}")
@@ -417,7 +438,8 @@ class EnhancedMedicalDataLoader:
             data = self.train_data
         
         # Sample batch
-        batch_data = random.sample(data, min(self.batch_size, len(data)))
+        batch_size = min(self.batch_size, len(data))
+        batch_data = random.sample(data, batch_size)
         
         questions = [item["question"] for item in batch_data]
         answers = [item["answer"] for item in batch_data]
@@ -448,7 +470,7 @@ class EnhancedMedicalDataLoader:
 
 class FederatedMedicalClient(nn.Module):
     """
-    Complete federated learning client for medical QA - IMPROVED VERSION
+    Complete federated learning client for medical QA - CSV-ONLY VERSION
     """
     
     def __init__(self, config: FederatedConfig):
@@ -492,8 +514,8 @@ class FederatedMedicalClient(nn.Module):
         # Build model components
         self.build_model()
         
-        # Initialize data loader and metrics
-        self.data_loader = EnhancedMedicalDataLoader(config)
+        # Initialize CSV data loader and metrics
+        self.data_loader = CSVMedicalDataLoader(config)
         self.metrics = MedicalQAMetrics()
         
         # Training state
@@ -502,7 +524,7 @@ class FederatedMedicalClient(nn.Module):
         self.best_loss = float('inf')
         self.patience_counter = 0
         
-        self.logger.info("Federated medical client initialized successfully")
+        self.logger.info("Federated medical client initialized successfully with CSV dataset")
     
     def setup_logging(self):
         """Setup logging configuration"""
@@ -1014,7 +1036,7 @@ class FederatedMedicalClient(nn.Module):
     
     def train_until_convergence(self):
         """Train until convergence"""
-        self.logger.info("🚀 Starting federated training until convergence...")
+        self.logger.info("🚀 Starting federated training with CSV dataset...")
         
         # Setup optimizer
         optimizer = torch.optim.AdamW(
@@ -1058,7 +1080,7 @@ class FederatedMedicalClient(nn.Module):
                 )
         
         final_status = "with local fallback" if self.use_local_fallback else "in federated mode"
-        self.logger.info(f"🏆 Training completed {final_status}. Final loss: {self.best_loss:.6f}")
+        self.logger.info(f"🏆 Training completed {final_status} using CSV dataset. Final loss: {self.best_loss:.6f}")
         return self.best_loss
 
 def main():
@@ -1071,12 +1093,12 @@ def main():
     random.seed(config.seed)
     np.random.seed(config.seed)
     
-    print("🏥 FEDERATED MEDICAL QA TRAINING SYSTEM")
+    print("🏥 FEDERATED MEDICAL QA TRAINING SYSTEM (CSV-ONLY)")
     print("=" * 60)
     print("Configuration:")
     print(f"  Model: {config.model.hidden_size}d, {config.model.num_hidden_layers} layers")
     print(f"  Training: {config.training.max_epochs} epochs, lr={config.training.learning_rate}")
-    print(f"  Data: {config.data.data_dir}/{config.data.dataset_file}")
+    print(f"  Data: CSV files in {config.data.data_dir}/")
     print(f"  Server: {config.client.server_url}")
     print("=" * 60)
     
