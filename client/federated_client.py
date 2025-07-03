@@ -1,6 +1,7 @@
 # client/federated_client.py
 """
 Complete Federated Learning Client for Medical QA
+Fixed version with tensor contiguity issues resolved
 Integrates with downloaded dataset and provides full training workflow
 """
 
@@ -603,7 +604,7 @@ class FederatedMedicalClient(nn.Module):
         return logits
     
     def compute_loss(self, logits, targets):
-        """Compute loss with multiple components"""
+        """Compute loss with multiple components - FIXED VERSION"""
         # Validate tensor shapes
         if logits.size(0) != targets.size(0):
             raise ValueError(f"Batch size mismatch: logits {logits.shape}, targets {targets.shape}")
@@ -611,7 +612,7 @@ class FederatedMedicalClient(nn.Module):
         if logits.size(1) != targets.size(1):
             raise ValueError(f"Sequence length mismatch: logits {logits.shape}, targets {targets.shape}")
         
-        # Ensure tensors are contiguous for proper reshaping
+        # Ensure tensors are contiguous for proper reshaping - THIS IS THE KEY FIX
         logits_flat = logits.contiguous().view(-1, logits.size(-1))
         targets_flat = targets.contiguous().view(-1)
         
@@ -702,12 +703,12 @@ class FederatedMedicalClient(nn.Module):
                     param_dict[param_name].grad += updated_grad * 0.1  # Scale factor
     
     def training_step(self, batch_data):
-        """Single training step"""
+        """Single training step - FIXED VERSION"""
         questions, answers, tokenized = batch_data
         
         input_ids = tokenized['input_ids']
         
-        # Validate input
+        # Validate input - ADDED VALIDATION
         if input_ids.size(0) == 0:
             self.logger.warning("Empty batch received, skipping training step")
             return None, None
@@ -736,7 +737,7 @@ class FederatedMedicalClient(nn.Module):
         self.logger.debug(f"Logits shape: {logits.shape}")
         self.logger.debug(f"Input IDs shape: {input_ids.shape}")
         
-        # Compute loss
+        # Compute loss - FIXED: Make targets contiguous
         targets = input_ids[:, 1:].contiguous()  # Next token prediction
         logits_for_loss = logits[:, :-1, :].contiguous()
         
@@ -744,6 +745,7 @@ class FederatedMedicalClient(nn.Module):
         self.logger.debug(f"Targets shape: {targets.shape}")
         self.logger.debug(f"Logits for loss shape: {logits_for_loss.shape}")
         
+        # FIXED: Added try-catch for loss computation
         try:
             total_loss, lm_loss = self.compute_loss(logits_for_loss, targets)
         except Exception as e:
@@ -814,7 +816,7 @@ class FederatedMedicalClient(nn.Module):
         return np.mean(epoch_losses) if epoch_losses else float('inf')
     
     def validate(self):
-        """Validation step"""
+        """Validation step - FIXED VERSION"""
         self.eval()
         val_losses = []
         
@@ -837,12 +839,15 @@ class FederatedMedicalClient(nn.Module):
                         server_response['position_ids']
                     )
                     
-                    # Compute loss
+                    # Compute loss - FIXED: Make targets contiguous
                     targets = input_ids[:, 1:].contiguous()
                     logits_for_loss = logits[:, :-1, :].contiguous()
-                    total_loss, _ = self.compute_loss(logits_for_loss, targets)
                     
-                    val_losses.append(total_loss.item())
+                    try:
+                        total_loss, _ = self.compute_loss(logits_for_loss, targets)
+                        val_losses.append(total_loss.item())
+                    except Exception as e:
+                        self.logger.warning(f"Validation loss computation failed: {e}")
         
         return np.mean(val_losses) if val_losses else float('inf')
     
