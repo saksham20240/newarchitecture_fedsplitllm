@@ -1,4 +1,3 @@
-"""
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -21,6 +20,7 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -48,7 +48,6 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-cover/
 
 # Translations
 *.mo
@@ -71,7 +70,6 @@ instance/
 docs/_build/
 
 # PyBuilder
-.pybuilder/
 target/
 
 # Jupyter Notebook
@@ -86,12 +84,6 @@ ipython_config.py
 
 # pipenv
 Pipfile.lock
-
-# poetry
-poetry.lock
-
-# pdm
-.pdm.toml
 
 # PEP 582
 __pypackages__/
@@ -130,34 +122,64 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-.idea/
-
-# VSCode
-.vscode/
-*.code-workspace
-
-# Project specific
-data/
-logs/
-checkpoints/
-test_data/
+# Machine Learning specific
+# Model files
 *.pt
 *.pth
 *.ckpt
-*.model
+*.safetensors
 *.bin
+*.h5
+*.hdf5
+*.pickle
+*.pkl
 
-# Temporary files
-*.tmp
-*.bak
+# Large datasets
+*.csv
+*.json
+*.parquet
+*.feather
+*.arrow
+*.txt
+!requirements.txt
+!README.txt
+!*small*.csv
+!*sample*.csv
+!*demo*.csv
+!*example*.csv
+
+# Directories with large files
+data/
+datasets/
+raw_data/
+processed_data/
+models/
+checkpoints/
+saved_models/
+outputs/
+results/
+experiments/
+
+# Wandb logs
+wandb/
+.wandb/
+
+# MLflow
+mlruns/
+
+# TensorBoard logs
+runs/
+logs/
+tensorboard_logs/
+
+# Jupyter notebook outputs
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
 *.swp
+*.swo
 *~
 
 # OS generated files
@@ -169,8 +191,30 @@ test_data/
 ehthumbs.db
 Thumbs.db
 
-# Custom configuration files
-custom_config.json
-my_config.json
-local_config.json
-"""
+# Large temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Compressed files (often large)
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Media files
+*.mp4
+*.avi
+*.mov
+*.mp3
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+!*small*.png
+!*logo*.png
+!*icon*.png
